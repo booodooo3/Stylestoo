@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import { SignedIn, SignedOut, SignInButton, UserButton, useAuth } from "@clerk/clerk-react";
+import CreditDisplay from './components/CreditDisplay';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
-import { performVirtualTryOn, analyzeStyle } from './services/geminiService';
+import { performVirtualTryOn, analyzeStyle } from './services/apiService';
 import { ImageData, AppState, GarmentType } from './types';
 
 interface ResultImages {
@@ -88,6 +90,8 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState(0);
   const [isClosetOpen, setIsClosetOpen] = useState(false);
+  const [garmentDescription, setGarmentDescription] = useState("");
+  const { getToken } = useAuth();
 
   const translations = {
     ar: {
@@ -112,6 +116,8 @@ const App: React.FC = () => {
         samplesLabel: 'خزانة الملابس',
         openCloset: 'فتح الدولاب',
         closeCloset: 'إغلاق',
+        garmentDescLabel: 'وصف الملابس (اختياري)',
+        garmentDescPlaceholder: 'أدخل وصف للملابس مثل: فستان أحمر، قميص أزرق...',
         types: {
           shirt: 'قميص / تيشيرت',
           long_dress: 'فستان طويل',
@@ -130,9 +136,9 @@ const App: React.FC = () => {
           'صور القطعة في إضاءة جيدة وواضحة.'
         ]
       },
-      actions: { start: 'ابدأ التحويل', cancel: 'إلغاء', save: 'حفظ النتائج', saveThis: 'حفظ الصورة', tryAgain: 'تجربة أخرى', downloading: 'جاري التحميل...' },
-      steps: ['تحليل الصور...', 'تحديد أنسجة القماش...', 'رسم أبعاد الجسم...', 'توليد الصور الثلاث...', 'اللمسات النهائية...'],
-      results: { title: 'النتائج النهائية', subtitle: 'تم توليد ثلاث زوايا مختلفة لعرض الملابس.', front: 'من الأمام', side: 'من الجنب', full: 'الجسم كامل' },
+      actions: { start: 'ابدأ التحويل', cancel: 'إلغاء', save: 'حفظ النتيجة', saveThis: 'حفظ الصورة', tryAgain: 'تجربة أخرى', downloading: 'جاري التحميل...' },
+      steps: ['تحليل الصور...', 'تحديد أنسجة القماش...', 'رسم أبعاد الجسم...', 'توليد الصورة...', 'اللمسات النهائية...'],
+      results: { title: 'النتائج النهائية', subtitle: 'تم توليد صورة لتجربة الملابس.', front: 'المظهر النهائي', side: 'من الجنب', full: 'الجسم كامل' },
       analysis: { title: 'تحليل المظهر', fit: 'دقة المقاس', color: 'تناسق اللون', style: 'تقييم الستايل', tips: 'إرشادات للكمال' },
       usedImages: 'الصور المستخدمة',
       footer: '© 2026 Developed by boood0003'
@@ -159,6 +165,8 @@ const App: React.FC = () => {
         samplesLabel: 'Smart Closet',
         openCloset: 'Open Closet',
         closeCloset: 'Close',
+        garmentDescLabel: 'Garment Description (Optional)',
+        garmentDescPlaceholder: 'Enter description e.g. Red dress, blue shirt...',
         types: {
           shirt: 'Shirt / T-Shirt',
           long_dress: 'Long Dress',
@@ -177,9 +185,9 @@ const App: React.FC = () => {
           'Capture with bright, even lighting.'
         ]
       },
-      actions: { start: 'Start Morphing', cancel: 'Cancel', save: 'Save Results', saveThis: 'Save Image', tryAgain: 'Try Another', downloading: 'Downloading...' },
-      steps: ['Analyzing images...', 'Identifying textures...', 'Mapping physique...', 'Generating 3 views...', 'Polishing results...'],
-      results: { title: 'Final Results', subtitle: 'Three distinct angles generated for your preview.', front: 'Front View', side: 'Side View', full: 'Full Body' },
+      actions: { start: 'Start Morphing', cancel: 'Cancel', save: 'Save Result', saveThis: 'Save Image', tryAgain: 'Try Another', downloading: 'Downloading...' },
+      steps: ['Analyzing images...', 'Identifying textures...', 'Mapping physique...', 'Generating image...', 'Polishing results...'],
+      results: { title: 'Final Results', subtitle: 'Image generated for your preview.', front: 'Final Look', side: 'Side View', full: 'Full Body' },
       analysis: { title: 'Style Analysis', fit: 'Fit Accuracy', color: 'Color Match', style: 'Style Score', tips: 'Tips for Perfection' },
       usedImages: 'Input Images',
       footer: '© 2026 Developed by boood0003'
@@ -260,7 +268,11 @@ const App: React.FC = () => {
     setAnalysis(null);
 
     try {
-      const resultData = await performVirtualTryOn(personImage, clothImage, garmentType);
+      const token = await getToken();
+      if (!token) {
+        throw new Error('Please sign in to continue');
+      }
+      const resultData = await performVirtualTryOn(personImage, clothImage, garmentType, token, garmentDescription);
       setResults(resultData);
       
       const styleAnalysis = await analyzeStyle(resultData.front, lang);
@@ -297,9 +309,7 @@ const App: React.FC = () => {
 
   const handleSaveAll = () => {
     if (!results) return;
-    downloadSingleImage(results.front, 'front');
-    downloadSingleImage(results.side, 'side');
-    downloadSingleImage(results.full, 'full');
+    downloadSingleImage(results.front, 'generated-look');
   };
 
   return (
@@ -322,7 +332,17 @@ const App: React.FC = () => {
           >
             {lang === 'ar' ? 'English' : 'عربي'}
           </button>
-          <Button variant="outline" className="text-sm px-4 py-2">{t.nav.login}</Button>
+          <SignedOut>
+            <SignInButton mode="modal">
+              <Button variant="outline" className="text-sm px-4 py-2">{t.nav.login}</Button>
+            </SignInButton>
+          </SignedOut>
+          <SignedIn>
+              <div className="flex items-center gap-3">
+                <CreditDisplay />
+                <UserButton />
+              </div>
+            </SignedIn>
         </div>
       </nav>
 
@@ -339,12 +359,28 @@ const App: React.FC = () => {
             <div className="grid md:grid-cols-2 gap-12 items-start">
               {/* Step 1 */}
               <div className="space-y-6">
-                <ImageUploader 
-                  label={t.step1.label} 
-                  description={t.step1.desc}
-                  onImageSelected={setPersonImage}
-                  currentImage={personImage?.base64}
-                />
+                <div className="space-y-4">
+                  <h3 className="text-xl font-bold">{t.step1.label}</h3>
+                  <ImageUploader 
+                    description={t.step1.desc}
+                    onImageSelected={setPersonImage}
+                    currentImage={personImage?.base64}
+                  />
+                </div>
+
+                {/* Garment Description Input */}
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-zinc-400 uppercase tracking-widest block">
+                    {t.step2.garmentDescLabel}
+                  </label>
+                  <input 
+                    type="text" 
+                    value={garmentDescription}
+                    onChange={(e) => setGarmentDescription(e.target.value)}
+                    placeholder={t.step2.garmentDescPlaceholder}
+                    className="w-full bg-zinc-900/50 border border-zinc-700 rounded-xl px-4 py-3 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-white/50 transition-colors"
+                  />
+                </div>
                 
                 {/* Person Photo Guidelines */}
                 <div className="glass-effect rounded-2xl p-6 border-white/5 bg-white/[0.02]">
@@ -367,64 +403,68 @@ const App: React.FC = () => {
 
               {/* Step 2 */}
               <div className="space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-[1fr_120px] gap-6 items-start">
-                  <div className="space-y-6">
-                    <ImageUploader 
-                      label={t.step2.label} 
-                      description={t.step2.desc}
-                      onImageSelected={setClothImage}
-                      currentImage={clothImage?.base64}
-                      currentUrl={clothImage?.url}
-                    />
+                <div className="space-y-4">
+                  <h3 className="text-xl font-bold">{t.step2.label}</h3>
+                  
+                  {/* Upload + Closet Row */}
+                  <div className="flex gap-4 h-64">
+                    {/* Upload Garment Area */}
+                    <div className="flex-1 h-full">
+                      <ImageUploader 
+                        className="h-full w-full"
+                        objectFit="contain"
+                        description={t.step2.desc}
+                        currentImage={clothImage?.base64}
+                        currentUrl={clothImage?.url}
+                        onImageSelected={(img) => {
+                          setClothImage(img);
+                        }}
+                      />
+                    </div>
 
-                    {/* Garment Type Grid Selector */}
-                    <div className="space-y-4">
+                    {/* Vertical Closet Strip */}
+                    <button 
+                      onClick={() => setIsClosetOpen(true)}
+                      className="w-24 h-full bg-zinc-950 border border-zinc-800 rounded-3xl relative overflow-hidden group hover:border-white/20 transition-all shadow-2xl flex flex-col items-center justify-center gap-4 shrink-0"
+                    >
+                      <div className="absolute inset-x-0 top-0 h-[1px] bg-zinc-900 group-hover:bg-zinc-800" />
+                      
+                      <div className="w-10 h-10 rounded-full bg-zinc-900 flex items-center justify-center border border-zinc-800 group-hover:scale-110 transition-transform duration-500">
+                        <svg viewBox="0 0 24 24" className="w-5 h-5 text-zinc-400" fill="none" stroke="currentColor" strokeWidth="1.5">
+                           <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5V2m0 2.5a2.5 2.5 0 00-2.5 2.5h5a2.5 2.5 0 00-2.5-2.5zM4 11.5c0-1.1.9-2 2-2h12a2 2 0 012 2l1 7c.1.6-.4 1.2-1 1.2H4a1 1 0 01-1-1.2l1-7z" />
+                           <path d="M7 9.5L12 6.5L17 9.5" strokeLinecap="round" />
+                        </svg>
+                      </div>
+                      
+                      <span className="text-[10px] font-bold text-zinc-500 group-hover:text-white uppercase tracking-tighter transition-colors rotate-90 whitespace-nowrap">
+                        {t.step2.openCloset}
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Garment Type Grid Selector */}
+                  <div className="space-y-2 pt-2">
                        <h4 className="text-sm font-bold text-zinc-400 uppercase tracking-widest">{t.step2.typeLabel}</h4>
-                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                       <div className="grid grid-cols-4 gap-2">
                          {(Object.keys(t.step2.types) as GarmentType[]).map((type) => (
                            <button
                              key={type}
                              onClick={() => setGarmentType(type)}
-                             className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all duration-300 gap-2 ${
+                             className={`w-full aspect-square flex flex-col items-center justify-center p-1 rounded-xl border transition-all duration-300 gap-1 overflow-hidden ${
                                garmentType === type 
                                ? 'bg-white text-black border-white shadow-[0_0_20px_rgba(255,255,255,0.2)]' 
                                : 'bg-white/5 border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:bg-white/10'
                              }`}
                            >
-                             <div className={garmentType === type ? 'text-black' : 'text-zinc-400'}>
-                               {garmentIcons[type]}
+                             <div className={`${garmentType === type ? 'text-black' : 'text-zinc-400'} flex-shrink-0`}>
+                               {React.cloneElement(garmentIcons[type] as React.ReactElement, { className: "w-5 h-5" })}
                              </div>
-                             <span className="text-[10px] font-bold text-center leading-tight">
+                             <span className="text-[8px] font-bold text-center leading-none w-full truncate px-0.5">
                                {t.step2.types[type]}
                              </span>
                            </button>
                          ))}
                        </div>
-                    </div>
-                  </div>
-                  
-                  {/* Black Closet Component */}
-                  <div className="flex flex-col items-center gap-3">
-                    <h4 className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider text-center">{t.step2.samplesLabel}</h4>
-                    <button 
-                      onClick={() => setIsClosetOpen(true)}
-                      className="w-full aspect-[2/3] bg-zinc-950 border border-zinc-800 rounded-3xl relative overflow-hidden group hover:border-white/20 transition-all shadow-2xl flex flex-col items-center justify-center gap-4"
-                    >
-                      {/* Closet Doors Detail */}
-                      <div className="absolute inset-y-0 left-1/2 w-[1px] bg-zinc-900 group-hover:bg-zinc-800" />
-                      <div className="absolute top-1/2 left-2 w-1.5 h-6 bg-zinc-800 rounded-full" />
-                      <div className="absolute top-1/2 right-2 w-1.5 h-6 bg-zinc-800 rounded-full" />
-                      
-                      <div className="w-12 h-12 rounded-full bg-zinc-900 flex items-center justify-center border border-zinc-800 group-hover:scale-110 transition-transform duration-500">
-                        <svg viewBox="0 0 24 24" className="w-6 h-6 text-zinc-400" fill="none" stroke="currentColor" strokeWidth="1.5">
-                           <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5V2m0 2.5a2.5 2.5 0 00-2.5 2.5h5a2.5 2.5 0 00-2.5-2.5zM4 11.5c0-1.1.9-2 2-2h12a2 2 0 012 2l1 7c.1.6-.4 1.2-1 1.2H4a1 1 0 01-1-1.2l1-7z" />
-                           <path d="M7 9.5L12 6.5L17 9.5" strokeLinecap="round" />
-                        </svg>
-                      </div>
-                      <span className="text-[10px] font-bold text-zinc-500 group-hover:text-white uppercase tracking-tighter transition-colors">
-                        {t.step2.openCloset}
-                      </span>
-                    </button>
                   </div>
                 </div>
                 
@@ -507,13 +547,11 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="flex justify-center">
               {[
-                { img: results?.front, label: t.results.front, id: 'front' },
-                { img: results?.side, label: t.results.side, id: 'side' },
-                { img: results?.full, label: t.results.full, id: 'full' }
+                { img: results?.front, label: t.results.front, id: 'generated-look' }
               ].map((view, i) => (
-                <div key={i} className="space-y-3 group">
+                <div key={i} className="space-y-3 group w-full max-w-lg">
                   <p className="text-xs uppercase tracking-widest text-zinc-500 font-bold text-center">{view.label}</p>
                   <div className="glass-effect rounded-2xl overflow-hidden shadow-xl aspect-[3/4] relative hover:ring-2 hover:ring-white/20 transition-all duration-300">
                     <img src={view.img} alt={view.label} className="w-full h-full object-cover" />
@@ -589,7 +627,7 @@ const App: React.FC = () => {
                      <img src={clothImage?.base64 || clothImage?.url} className="w-full h-full object-cover" />
                    </div>
                  </div>
-                 <p className="text-[10px] text-zinc-500 italic opacity-50">Powered by Gemini 2.5 Flash Lite (Optimized).</p>
+                 <p className="text-[10px] text-zinc-500 italic opacity-50">Powered by Stylestoo AI Engine</p>
               </div>
             </div>
           </div>

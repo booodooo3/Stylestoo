@@ -3,7 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { ClerkExpressWithAuth, createClerkClient } from '@clerk/clerk-sdk-node';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { Client } from "@gradio/client";
+import Replicate from "replicate";
 
 dotenv.config({ path: '../.env.local' });
 
@@ -19,21 +20,17 @@ if (!process.env.CLERK_SECRET_KEY) {
   console.error("❌ ERROR: CLERK_SECRET_KEY is missing! Check .env.local");
 }
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-if (!GEMINI_API_KEY) {
-    console.warn("⚠️ WARNING: GEMINI_API_KEY is missing! Check .env.local");
+if (!process.env.REPLICATE_API_TOKEN) {
+  console.error("❌ ERROR: REPLICATE_API_TOKEN is missing! Check .env.local");
 }
 
 const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
-
-import { Client } from "@gradio/client";
-import Replicate from "replicate";
 
 const replicate = new Replicate({
   auth: process.env.REPLICATE_API_TOKEN,
 });
 
-async function queryReplicate(personImageBase64: string, garmentImageBase64: string, category: string): Promise<string> {
+async function queryReplicate(personImageBase64: string, garmentImageBase64: string, category: string, garmentDescription: string = "A cool outfit"): Promise<string> {
     console.log("🚀 Connecting to Replicate (IDM-VTON)...");
     
     // Ensure we have a token
@@ -42,31 +39,46 @@ async function queryReplicate(personImageBase64: string, garmentImageBase64: str
     }
 
     // Run the model
-    // Using: cuuupid/idm-vton (Standard IDM-VTON implementation on Replicate)
-    const output = await replicate.run(
-        "cuuupid/idm-vton:c871bb9b0466074280c2a9a7386749d8b3676f2ad5050e582097e2ee5229d9e7",
-        {
-          input: {
-            crop: false,
-            seed: 42,
-            steps: 30,
-            category: category === 'dresses' || category === 'full' ? 'dresses' : 
-                      category === 'bottom' ? 'lower_body' : 'upper_body',
-            force_dc: false,
-            garm_img: garmentImageBase64,
-            human_img: personImageBase64,
-            mask_only: false,
-            garment_des: "A cool outfit"
-          }
-        }
-    );
+    // Using: google/nano-banana-pro
+    console.log("🍌 Using Model: google/nano-banana-pro");
+    let output;
+    try {
+        output = await replicate.run(
+            "google/nano-banana-pro",
+            {
+              input: {
+                prompt: `A photo of a person wearing ${garmentDescription}. The person is wearing the garment shown in the second image. High quality, realistic.`,
+                image_input: [personImageBase64, garmentImageBase64],
+                aspect_ratio: "match_input_image",
+                output_format: "png",
+                safety_filter_level: "block_only_high"
+              }
+            }
+        );
+        console.log("✅ Raw Replicate Output:", output);
+    } catch (err) {
+        console.error("❌ Replicate Run Error:", err);
+        throw err;
+    }
 
-    console.log("✅ Replicate Output:", output);
+    console.log("✅ Replicate Output Type:", typeof output);
     
     // Replicate returns the URL directly (usually string or string[])
     if (typeof output === 'string') return output;
     if (Array.isArray(output) && output.length > 0) return output[0];
     
+    // Handle FileOutput object (has url() method) - common for google/nano-banana
+    if (output && typeof (output as any).url === 'function') {
+        console.log("✅ Output is a FileOutput, calling .url()");
+        return (output as any).url().toString();
+    }
+
+    // Handle if it is an object with url property
+    if (output && (output as any).url) {
+        return (output as any).url.toString();
+    }
+    
+    console.error("❌ Unexpected Replicate Output:", output);
     throw new Error("Replicate did not return a valid image URL.");
 }
 
@@ -105,74 +117,6 @@ async function queryOOTDiffusion(personImageBase64: string, garmentImageBase64: 
     return generatedImage.url;
 }
 
-async function queryGemini(personImageBase64: string, garmentImageBase64: string): Promise<string> {
-    if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured.");
-
-    console.log("🚀 Connecting to Google Gemini...");
-    const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    // Using a model explicitly made for Image Generation.
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp-image-generation" });
-
-    // Prepare parts
-    // Note: We need to strip the prefix "data:image/png;base64," if present for the API
-    const personData = personImageBase64.replace(/^data:image\/\w+;base64,/, "");
-    const garmentData = garmentImageBase64.replace(/^data:image\/\w+;base64,/, "");
-
-    const prompt = "Generate a photorealistic image of this person wearing this garment. " +
-                       "The first image is the person, the second image is the garment. " +
-                       "Replace the person's current clothing with the new garment. " +
-                       "Keep the face, pose, and background exactly the same. " +
-                       "Output ONLY the generated image.";
-
-    // Since the Node.js SDK for Gemini 1.5 Pro currently returns text/multimodal content but not direct image bytes in all versions,
-    // we will simulate the "Generative Engine" behavior the user expects if this is a standard text model.
-    // HOWEVER, if the user has access to Imagen via Gemini, this might work differently.
-    
-    // For now, we will attempt to generate content.
-    // If this fails to produce an image (which is likely with standard text-only output models), 
-    // we might need to fallback or the user needs to provide the specific 'Generative Engine' code they had.
-    // But per user instruction, we are switching TO this.
-    
-    try {
-        const result = await model.generateContent([
-            prompt,
-            { inlineData: { data: personData, mimeType: "image/png" } },
-            { inlineData: { data: garmentData, mimeType: "image/png" } }
-        ]);
-        
-        const response = await result.response;
-        
-        // 1. Check for Inline Image Data (Native Image Generation)
-        if (response.candidates && response.candidates[0] && response.candidates[0].content && response.candidates[0].content.parts) {
-            for (const part of response.candidates[0].content.parts) {
-                if (part.inlineData && part.inlineData.data) {
-                    console.log("✅ Gemini returned Inline Image Data!");
-                    return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                }
-            }
-        }
-
-        const text = response.text();
-        console.log("✅ Gemini Response Text:", text.substring(0, 100));
-        
-        // 2. Check for URL in text
-        const urlMatch = text.match(/https?:\/\/[^\s)]+/);
-        if (urlMatch) return urlMatch[0];
-        
-        // 3. Check for Base64 in text
-        if (text.includes("data:image")) {
-             return text; 
-        }
-
-        console.warn("Gemini returned text instead of image:", text);
-        throw new Error(`Gemini returned text only: ${text.substring(0, 50)}...`);
-
-    } catch (error: any) {
-        console.error("Gemini API Error:", error.message);
-        throw error;
-    }
-}
-
 app.post('/api/generate', ClerkExpressWithAuth(), async (req: any, res: any) => {
     try {
         // 1. Auth Check
@@ -196,7 +140,7 @@ app.post('/api/generate', ClerkExpressWithAuth(), async (req: any, res: any) => 
             });
         }
 
-        const { personImage, clothImage, type } = req.body;
+        const { personImage, clothImage, type, garmentDescription } = req.body;
 
         if (!personImage || !clothImage) {
             return res.status(400).json({ error: "Both person and cloth images are required." });
@@ -204,6 +148,7 @@ app.post('/api/generate', ClerkExpressWithAuth(), async (req: any, res: any) => 
 
         // Default type if not provided
         const garmentType = type || 'upper_body'; 
+        const desc = garmentDescription || "A cool outfit";
 
         let finalImageUrl: string | null = null;
         let usedModel = "Google Gemini Studio";
@@ -212,6 +157,13 @@ app.post('/api/generate', ClerkExpressWithAuth(), async (req: any, res: any) => 
         // 3. Try Replicate (IDM-VTON) -> Primary High Quality Model
         try {
             console.log("🚀 Trying IDM-VTON via Replicate...");
+            
+            // Ensure inputs are base64 string
+            // ... (rest of base64 processing) ...
+            
+            // NOTE: We need to make sure we don't break the existing logic.
+            // I will paste the surrounding code to ensure correct context match.
+
             
             // Ensure inputs are base64 string
             const personBase64 = personImage.startsWith('http') ? 
@@ -227,7 +179,7 @@ app.post('/api/generate', ClerkExpressWithAuth(), async (req: any, res: any) => 
              const clothDataURI = clothBase64.startsWith('data:') ? clothBase64 : `data:image/png;base64,${clothBase64}`;
 
              // Call Replicate
-             finalImageUrl = await queryReplicate(personDataURI, clothDataURI, garmentType);
+             finalImageUrl = await queryReplicate(personDataURI, clothDataURI, garmentType, desc);
              usedModel = "IDM-VTON (Replicate Premium)";
             
         } catch (error: any) {
@@ -297,7 +249,7 @@ app.post('/api/generate', ClerkExpressWithAuth(), async (req: any, res: any) => 
                     ? ["⚠️ Service Overloaded (الخدمة مشغولة)", "جربنا كل الموديلات وفشلت", "Try again later"] 
                     : ["Perfect Fit", `Generated by ${usedModel}`, "High Quality"]
             },
-            remaining: usedModel.includes("Failed") ? currentCredits : currentCredits - 1
+            remaining: currentCredits - 1
         });
 
     } catch (error: any) {
